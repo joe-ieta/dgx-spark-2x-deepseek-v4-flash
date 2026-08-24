@@ -1,5 +1,9 @@
 # Post-pin upstream round 2 (2026-08-18/19) — ixfix + c128arev + smpcache promoted
 
+> **Still the current production recipe as of 2026-08-23.** The 2026-08-22/23
+> round ([docs/18](18-postpin-upstream-round3.md)) A/B-tested three further
+> candidates and held all of them — nothing here changed.
+
 The second upstream survey of the vLLM `main` delta on top of the production pin,
 and the first one whose candidates all landed. Four lanes were A/B-tested on the
 production pair, one payload per lane, under the standing gate (warm paired

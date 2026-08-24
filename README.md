@@ -26,7 +26,7 @@ Name decoder (this kit's jargon, used throughout):
 - **smpcache** — current production: c8r-tbfix plus three gated one-file upstream-fix layers (ixfix = #52492, c128arev = #51318, smpcache = #52329, the last upstream-subsuming tbfix); receipt [docs/17](docs/17-postpin-upstream-round2.md).
 - **cand7 / cand4** — the 0.26.0 thin-overlay image lanes, now deeper rollback rungs.
 
-**Current production stack (still current 2026-08-19):** full-source vLLM **main @48bada6ea4**
+**Current production stack (still current 2026-08-23):** full-source vLLM **main @48bada6ea4**
 (0.27-content) + the gx10 GB10 overlay + a measured-neutral #49731 revert + four gated
 one-file derivative layers (tbfix → ixfix → c128arev → smpcache) → image
 `vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache`, built by
@@ -37,9 +37,12 @@ at revision `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`. KV pool **3,027,217 toke
 the pinned 19.85 GiB budget. The 2026-08-18/19 post-pin round A/B-tested four upstream
 candidates from the vLLM `main` delta and promoted the three silent-corruption/hygiene
 fixes on non-inferiority (C1 a repeatable small win on c128arev) —
-[docs/17](docs/17-postpin-upstream-round2.md). Receipts:
+[docs/17](docs/17-postpin-upstream-round2.md). A third round (2026-08-22/23)
+A/B-tested three further candidates and held all of them; production is unchanged by it
+([docs/18](docs/18-postpin-upstream-round3.md)). Receipts:
 [docs/14](docs/14-vllm-027-c8r.md), [docs/15](docs/15-tbfix-and-async-safety.md),
-[docs/16](docs/16-post-pin-qualification.md).
+[docs/16](docs/16-post-pin-qualification.md),
+[docs/18](docs/18-postpin-upstream-round3.md).
 
 **0731 is the official V4-Flash release** (2026-07-31), superseding the
 `DeepSeek-V4-Flash-DSpark` preview. Same checkpoint family, same ~155.4 GiB footprint,
@@ -323,7 +326,9 @@ carries the tbfix term in upstream's cached predicate; see
 [docs/15](docs/15-tbfix-and-async-safety.md) (tbfix + guarded async lane) →
 [docs/16](docs/16-post-pin-qualification.md) (post-pin candidates measured, default unchanged) →
 [docs/17](docs/17-postpin-upstream-round2.md) (post-pin round 2: ixfix/c128arev/smpcache
-promoted, prefix-retention HOLD).
+promoted, prefix-retention HOLD) →
+[docs/18](docs/18-postpin-upstream-round3.md) (post-pin round 3: three candidates held,
+production unchanged).
 
 ---
 
@@ -348,6 +353,7 @@ promoted, prefix-retention HOLD).
 | [docs/15-tbfix-and-async-safety.md](docs/15-tbfix-and-async-safety.md) | The **c8r-tbfix promotion** and guarded async-scheduling qualification lane: root cause, rollback, deterministic W6 workloads, power capture, swap/memory aborts, and the current HOLD. |
 | [docs/16-post-pin-qualification.md](docs/16-post-pin-qualification.md) | **2026-08-15:** later `main` + #51739, `reasoning_effort=low`, and #47808 adaptive verify were measured and **left off** the default. How to use `thinking_token_budget` instead. |
 | [docs/17-postpin-upstream-round2.md](docs/17-postpin-upstream-round2.md) | **2026-08-18/19:** the second post-pin upstream survey (89-commit delta) — #52492 (ixfix), #51318 (c128arev) and #52329 (smpcache, retires tbfix) **promoted** on gated non-inferiority; prefix-cache retention 4096 on HOLD; the deferred/rejected list. |
+| [docs/18-postpin-upstream-round3.md](docs/18-postpin-upstream-round3.md) | **2026-08-22/23:** the third post-pin upstream survey (235-commit delta) — #53017 draft-logits stride, #52823 adaptive topk width and the SpinCondition busy-wait sleep each gated and **held** (production unchanged); #52998 FlashInfer all-reduce structurally N/A on 2-node RoCE; the rejected list and lane-wiring lessons. |
 | [docs/LONG_CONTEXT_CRASH_FIX.md](docs/LONG_CONTEXT_CRASH_FIX.md) | The `DSPARK_SLOT_CLAMP` long-context crash guard — **legacy no-op on 0.26+/c8r** (zero readers in the installed package; the overlay handles the crash class itself), kept for 0.25.1-rollback compatibility. |
 
 ---
