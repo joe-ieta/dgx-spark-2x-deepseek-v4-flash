@@ -40,3 +40,13 @@ runtime/.xid-test-*
 
 # Python bytecode caches from local test/validation runs.
 __pycache__/
+
+# Local huggingface_hub cache + local wheel staging + image archives (control-host-only artifacts).
+hub/
+wheels/
+cuda.tar
+
+# Agent tooling markers / harness data (nothing to commit).
+.agent_harnesses.json
+.check_for_skill_update_done
+.check_for_update_done

@@ -17,7 +17,7 @@ export PATH="/usr/local/cuda/bin:$PATH"
 export CUDA_HOME=/usr/local/cuda
 
 if [ ! -f ~/nccl/build/lib/libnccl.so ]; then
-  [ -d ~/nccl ] || git clone -b v2.30u1 --depth 1 https://github.com/NVIDIA/nccl.git ~/nccl
+  [ -d ~/nccl ] || git clone  --depth 1 https://github.com/NVIDIA/nccl.git ~/nccl
   cd ~/nccl
   make -j src.build NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
 fi

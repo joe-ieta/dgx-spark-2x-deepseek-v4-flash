@@ -36,31 +36,41 @@ ssh "$CLUSTER_USER@$WORKER_HOST" \
   "HF_CACHE='$HF_CACHE' DSPARK_VLLM_IMAGE='$DSPARK_VLLM_IMAGE' bash ~/flashinfer-pr3615/clear-sampling-cache.sh" \
   || fail "worker sampler JIT-cache clear failed" "verify HF_CACHE permissions and the patched image"
 
-head_id="$(ssh "$CLUSTER_USER@$HEAD_HOST" "docker image inspect '$DSPARK_VLLM_IMAGE' --format '{{.Id}}'")" \
-  || fail "could not inspect head image" "verify image tag on head"
-worker_id="$(ssh "$CLUSTER_USER@$WORKER_HOST" "docker image inspect '$DSPARK_VLLM_IMAGE' --format '{{.Id}}'")" \
-  || fail "could not inspect worker image" "verify docker load on worker"
-head_base_id="$(ssh "$CLUSTER_USER@$HEAD_HOST" "docker image inspect '$DSPARK_VLLM_BASE_IMAGE' --format '{{.Id}}'")" \
-  || fail "could not inspect head rollback image" "verify base image tag on head"
-worker_base_id="$(ssh "$CLUSTER_USER@$WORKER_HOST" "docker image inspect '$DSPARK_VLLM_BASE_IMAGE' --format '{{.Id}}'")" \
-  || fail "could not inspect worker rollback image" "rebuild the archive with SKIP_SAVE=0"
 
-echo "head image:   $head_id"
-echo "worker image: $worker_id"
-[ "$head_id" = "$worker_id" ] || fail "image IDs differ" "rerun distribution or rebuild from the same tag"
+head_rootfs="$(ssh "$CLUSTER_USER@$HEAD_HOST" \
+"docker image inspect '$DSPARK_VLLM_IMAGE' --format '{{json .RootFS.Layers}}'")"
+worker_rootfs="$(ssh "$CLUSTER_USER@$WORKER_HOST" \
+"docker image inspect '$DSPARK_VLLM_IMAGE' --format '{{json .RootFS.Layers}}'")"
+
+echo "head layers:"
+echo "$head_rootfs"
+echo "worker layers:"
+echo "$worker_rootfs"
+[ "$head_rootfs" = "$worker_rootfs" ] \
+ || fail "image layers differ" "rerun distribution"
 echo "ok: image IDs match"
-echo "head rollback image:   $head_base_id"
-echo "worker rollback image: $worker_base_id"
-[ "$head_base_id" = "$worker_base_id" ] \
-  || fail "rollback image IDs differ" "rerun distribution with SKIP_SAVE=0"
+
+head_basefs="$(ssh "$CLUSTER_USER@$HEAD_HOST" \
+"docker image inspect '$DSPARK_VLLM_BASE_IMAGE' --format '{{json .RootFS.Layers}}'")"
+worker_basefs="$(ssh "$CLUSTER_USER@$WORKER_HOST" \
+"docker image inspect '$DSPARK_VLLM_BASE_IMAGE' --format '{{json .RootFS.Layers}}'")"
+
+echo "head base layers:"
+echo "$head_basefs"
+echo "worker base layers:"
+echo "$worker_basefs"
+[ "$head_basefs" = "$worker_basefs" ] \
+ || fail "image layers differ" "rerun distribution"
 echo "ok: rollback image IDs match"
 
+
 if [ -n "${DSPARK_VLLM_ROLLBACK_IMAGE:-}" ]; then
-  head_runtime_id="$(ssh "$CLUSTER_USER@$HEAD_HOST" "docker image inspect '$DSPARK_VLLM_ROLLBACK_IMAGE' --format '{{.Id}}'")" \
+  head_runtime_id="$(ssh "$CLUSTER_USER@$HEAD_HOST" "docker image inspect '$DSPARK_VLLM_ROLLBACK_IMAGE' --format '{{json .RootFS.Layers}}'")" \
     || fail "could not inspect head runtime rollback" "verify rollback image tag on head"
-  worker_runtime_id="$(ssh "$CLUSTER_USER@$WORKER_HOST" "docker image inspect '$DSPARK_VLLM_ROLLBACK_IMAGE' --format '{{.Id}}'")" \
+  worker_runtime_id="$(ssh "$CLUSTER_USER@$WORKER_HOST" "docker image inspect '$DSPARK_VLLM_ROLLBACK_IMAGE' --format '{{json .RootFS.Layers}}'")" \
     || fail "could not inspect worker runtime rollback" "rerun distribution with SKIP_SAVE=0"
   [ "$head_runtime_id" = "$worker_runtime_id" ] \
     || fail "runtime rollback image IDs differ" "rerun distribution with SKIP_SAVE=0"
   echo "ok: runtime rollback image IDs match: $head_runtime_id"
 fi
+

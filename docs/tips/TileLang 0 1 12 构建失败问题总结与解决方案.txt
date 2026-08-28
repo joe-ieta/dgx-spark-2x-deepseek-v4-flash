@@ -1,0 +1,387 @@
+【TileLang 0.1.12 构建失败问题总结与解决方案】
+
+一、问题背景
+---------------
+在执行：
+
+    bringup/05-build-image.sh
+
+构建 vLLM Docker 镜像时，TileLang：
+
+    tilelang==0.1.12
+
+构建失败。
+
+最初发现：
+
+- TileLang 0.1.12 可以正常开始编译；
+- 但是在 Cython 代码编译阶段失败；
+- 错误原因：
+
+    error:
+    "Cython 3.3 requires the Python Limited API version
+     to be 3.9 or greater."
+
+关键错误：
+
+    -DPy_LIMITED_API=0x03080000
+
+说明 TileLang 使用 Python Limited API 3.8，
+而最新 Cython 3.3.0 不再支持 Python 3.8 Limited API。
+
+--------------------------------------------------
+
+二、根本原因分析
+---------------
+
+整个构建链路如下：
+
+Docker build
+    |
+    |
+    +-- uv pip install -r requirements/cuda.txt
+            |
+            |
+            +-- tilelang==0.1.12
+                    |
+                    |
+                    +-- PEP 517 build isolation
+                            |
+                            |
+                            +-- 创建临时 build 环境
+                            |
+                            +-- 根据 tilelang/pyproject.toml:
+                                    requires=[
+                                        "cython>=3.1.0",
+                                        "scikit-build-core",
+                                        ...
+                                    ]
+
+                            |
+                            +-- 自动安装最新 Cython
+                                    |
+                                    +-- Cython 3.3.0
+
+                            |
+                            +-- 编译 TileLang Cython wrapper
+
+                                    |
+                                    +-- TileLang:
+                                        Py_LIMITED_API=0x03080000
+
+                                    |
+                                    +-- Cython 3.3:
+                                        需要 >= Python 3.9 API
+
+                                    |
+                                    +-- 冲突失败
+
+
+结论：
+
+不是 Docker GCC/CUDA/CMake 问题。
+
+不是 /opt/venv 里面的 Cython 版本问题。
+
+真正问题：
+
+    PEP 517 build isolation
+        自动安装了 Cython 3.3.0
+
+导致：
+
+    TileLang 0.1.12
+        +
+    Cython 3.3.0
+
+不兼容。
+
+--------------------------------------------------
+
+三、为什么之前安装 Cython 3.2.9 没有效果
+-------------------------------------------
+
+已经验证：
+
+Docker 环境：
+
+    /opt/venv/bin/python3
+
+里面：
+
+    Cython 3.2.9
+
+正常：
+
+    VENV Cython: 3.2.9
+
+
+但是 TileLang 构建时使用：
+
+    /opt/uv/cache/builds-v0/.tmpXXXX/python
+
+这是 PEP 517 创建的临时隔离环境。
+
+
+所以：
+
+系统环境：
+
+    Cython 3.2.9   ✓
+
+
+TileLang build isolation：
+
+    Cython 3.3.x   ✗
+
+
+两个环境完全不同。
+
+--------------------------------------------------
+
+四、Dockerfile 调查结果
+-----------------------
+
+Dockerfile 中与 TileLang 相关的主要位置：
+
+1) requirements/cuda.txt
+
+里面包含：
+
+    tilelang==0.1.12
+
+
+因此所有安装：
+
+    uv pip install -r requirements/cuda.txt
+
+都会触发 TileLang build。
+
+
+发现有两个重要安装路径：
+
+--------------------------------------------------
+
+位置 1：
+base stage
+
+类似：
+
+    COPY requirements/cuda.txt requirements/cuda.txt
+
+    uv pip install \
+        --python /opt/venv/bin/python3 \
+        -r requirements/cuda.txt
+
+
+这是当前失败的位置。
+
+
+必须修改。
+
+
+--------------------------------------------------
+
+位置 2：
+runtime image
+
+类似：
+
+    COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+
+    uv pip install --system \
+        -r /tmp/requirements-cuda.txt
+
+
+这里也可能再次触发 TileLang build。
+
+
+也必须处理。
+
+
+--------------------------------------------------
+
+五、最终解决方案
+-----------------
+
+不要在 Dockerfile 前面简单安装：
+
+    Cython==3.2.9
+
+
+因为：
+
+它只影响主环境：
+
+    /opt/venv
+
+
+不会影响：
+
+    PEP 517 isolated build environment
+
+
+正确方法：
+
+让 TileLang 不走默认隔离构建。
+
+
+方案：
+
+1. 从 requirements/cuda.txt 中临时移除：
+
+    tilelang==0.1.12
+
+
+2. 单独安装 TileLang：
+
+    uv pip install \
+        --no-build-isolation \
+        "tilelang==0.1.12"
+
+
+并保证环境中已经有：
+
+    Cython==3.2.9
+
+例如：
+
+    uv pip install \
+        --system \
+        Cython==3.2.9 \
+        scikit-build-core==1.0.3 \
+        z3-solver \
+        patchelf \
+        ninja
+
+
+然后：
+
+    uv pip install \
+        --no-build-isolation \
+        tilelang==0.1.12
+
+
+这样 TileLang 编译时：
+
+使用：
+
+    Cython 3.2.9
+
+而不是：
+
+    PEP517 临时环境中的 Cython 3.3.x
+
+
+--------------------------------------------------
+
+六、需要修改的位置数量
+-----------------------
+
+针对 TileLang 问题：
+
+需要修改：
+
+    2 个地方
+
+
+1.
+base stage:
+
+    requirements/cuda.txt
+    uv pip install
+
+
+2.
+runtime stage:
+
+    /tmp/requirements-cuda.txt
+    uv pip install
+
+
+不用修改：
+
+    requirements/build/cuda.txt
+
+    requirements/test/cuda.txt
+
+    ROCm 部分
+
+
+--------------------------------------------------
+
+七、不要采用的方案
+------------------
+
+不要：
+
+1.
+只增加：
+
+    Cython==3.2.9
+
+到 requirements/cuda.txt
+
+
+原因：
+
+PEP517 仍然会建立隔离环境。
+
+
+2.
+清理 Docker cache 解决
+
+
+原因：
+
+cache 只是让问题重复出现更快。
+
+
+3.
+修改 CUDA/GCC/CMake
+
+
+原因：
+
+编译器已经正常：
+
+    GCC 13.3
+    CUDA 13.0
+    CMake 4.4
+
+
+真正冲突是：
+
+    Cython 版本
+
+
+--------------------------------------------------
+
+八、最终状态
+------------
+
+当前问题定位：
+
+    TileLang 0.1.12
+        +
+    Cython 3.3.0
+        +
+    Py_LIMITED_API=Python 3.8
+
+导致失败。
+
+
+最终修复方向：
+
+    固定 Cython==3.2.9
+
+并且：
+
+    禁止 TileLang 使用 PEP517 build isolation
+
+使用：
+
+    --no-build-isolation
+
+
+这是最小修改、风险最低的解决方案。

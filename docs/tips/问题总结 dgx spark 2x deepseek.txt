@@ -1,0 +1,350 @@
+问题总结：dgx-spark-2x-deepseek-v4-flash 项目中 bringup/07-download-weights.sh 下载 DeepSeek-V4-Flash 权重失败
+
+一、现象
+
+执行：
+
+    bash bringup/07-download-weights.sh
+
+失败：
+
+    FAIL: weight download failed on ieta-spark01.local
+
+最初错误：
+
+    httpx.ConnectTimeout: [Errno 110] Connection timed out
+
+环境：
+
+    HTTP_PROXY=http://202.0.0.114:4780/
+    HTTPS_PROXY=http://202.0.0.114:4780/
+    ALL_PROXY=socks://202.0.0.114:4780/
+
+---
+
+二、第一次排查：确认网络和 HuggingFace 是否正常
+
+测试代理：
+
+    nc -vz -w 5 202.0.0.114 4780
+
+结果：
+
+    Connection succeeded
+
+说明：
+    代理服务器正常。
+
+测试：
+
+    curl -x http://202.0.0.114:4780 \
+         https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4-Flash-0731
+
+结果：
+
+    HTTP/2 200
+
+可以正常返回模型信息。
+
+说明：
+
+    - HuggingFace 可访问
+    - 模型地址正确
+    - HTTP CONNECT 代理正常
+
+
+---
+
+三、发现第一个根因：ALL_PROXY 的 SOCKS 配置导致 HTTPX 异常
+
+huggingface_hub 使用：
+
+    httpx
+
+环境中存在：
+
+    ALL_PROXY=socks://202.0.0.114:4780/
+
+HTTPX 不支持当前环境下的 SOCKS proxy：
+
+错误：
+
+    ValueError:
+    Unknown scheme for proxy URL
+    URL('socks://202.0.0.114:4780/')
+
+
+解决：
+
+执行：
+
+    unset ALL_PROXY
+    unset all_proxy
+
+保留：
+
+    HTTP_PROXY=http://202.0.0.114:4780
+    HTTPS_PROXY=http://202.0.0.114:4780
+
+
+然后验证：
+
+    hf download \
+      deepseek-ai/DeepSeek-V4-Flash-0731 \
+      --dry-run
+
+
+结果：
+
+    [dry-run] Fetching 74 files: 100%
+    Will download 74 files totalling 166.9G
+
+
+证明：
+
+    HuggingFace CLI 已经可以正常访问。
+
+
+---
+
+四、第二次排查：为什么手工 hf 可以，脚本仍失败？
+
+手工：
+
+    HF_HOME=$HF_CACHE \
+    HF_HUB_DISABLE_XET=1 \
+    ~/hf-venv/bin/hf download ...
+
+成功。
+
+
+但是：
+
+    bash bringup/07-download-weights.sh
+
+仍失败。
+
+
+继续检查 SSH 环境：
+
+执行：
+
+    source runtime/cluster.env
+
+    ssh "$CLUSTER_USER@$HEAD_HOST" '
+      hostname
+      env | grep -i proxy
+      ~/hf-venv/bin/hf --version
+    '
+
+
+结果：
+
+    hostname=ieta-spark01
+
+    --- proxy ---
+    （没有任何输出）
+
+    hf version:
+    1.28.0
+
+
+发现：
+
+SSH 登录后的环境没有代理变量。
+
+
+---
+
+五、第二个根因：07-download-weights.sh 通过 SSH 执行时没有传递代理环境
+
+实际流程：
+
+手工执行：
+
+    当前 shell
+        |
+        | HTTP_PROXY 存在
+        |
+        hf download
+        |
+        成功
+
+
+脚本执行：
+
+    当前 shell
+        |
+        ssh
+        |
+        远程 shell
+        |
+        HTTP_PROXY 丢失
+        |
+        hf download
+        |
+        直接访问 huggingface.co
+        |
+        超时
+
+
+因为 DGX Spark 不能直接访问 HuggingFace：
+
+    DGX Spark ----X----> huggingface.co
+
+
+必须经过：
+
+    DGX Spark
+        |
+        |
+    HTTP Proxy
+    202.0.0.114:4780
+        |
+        |
+    huggingface.co
+
+
+---
+
+六、最终解决方案
+
+方案 A（推荐）：修改 bringup/07-download-weights.sh
+
+在 SSH 调用时显式传递代理：
+
+加入：
+
+    HTTP_PROXY
+    HTTPS_PROXY
+    http_proxy
+    https_proxy
+
+
+例如：
+
+    ssh user@host "
+      HTTP_PROXY='$HTTP_PROXY' \
+      HTTPS_PROXY='$HTTPS_PROXY' \
+      http_proxy='$http_proxy' \
+      https_proxy='$https_proxy' \
+      bash -s
+    "
+
+
+同时在远程执行环境中：
+
+    unset ALL_PROXY
+    unset all_proxy
+
+
+避免 SOCKS proxy 再次影响 HTTPX。
+
+
+---
+
+方案 B（临时验证）
+
+执行：
+
+    export HTTP_PROXY=http://202.0.0.114:4780
+    export HTTPS_PROXY=http://202.0.0.114:4780
+
+    export http_proxy=$HTTP_PROXY
+    export https_proxy=$HTTPS_PROXY
+
+    unset ALL_PROXY
+    unset all_proxy
+
+
+然后：
+
+    bash bringup/07-download-weights.sh
+
+
+---
+
+方案 C（系统级）
+
+配置 SSH 代理变量转发：
+
+客户端：
+
+    ~/.ssh/config
+
+增加：
+
+    Host ieta-spark01.local
+        SendEnv HTTP_PROXY
+        SendEnv HTTPS_PROXY
+        SendEnv http_proxy
+        SendEnv https_proxy
+
+
+服务器：
+
+    /etc/ssh/sshd_config
+
+增加：
+
+    AcceptEnv HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+
+重启：
+
+    systemctl restart ssh
+
+
+---
+
+七、最终状态
+
+已经确认：
+
+✅ DGX Spark 网络正常  
+✅ Proxy 服务正常  
+✅ HuggingFace 可访问  
+✅ DeepSeek-V4-Flash 模型存在  
+✅ hf CLI 正常  
+✅ HTTPX 问题已解决（删除 ALL_PROXY）  
+✅ dry-run 下载成功（166.9GB）
+
+
+剩余问题：
+
+❌ bringup/07-download-weights.sh 的 SSH 环境没有继承代理变量
+
+
+最终修复：
+
+修改脚本，让 SSH remote command 显式传递：
+
+    HTTP_PROXY
+    HTTPS_PROXY
+
+并清理：
+
+    ALL_PROXY
+
+
+修复后：
+
+    bash bringup/07-download-weights.sh
+
+应该开始正式下载：
+
+    DeepSeek-V4-Flash-0731
+    74 files
+    约 166.9GB
+
+
+根本原因总结：
+
+不是 HuggingFace 问题；
+不是模型问题；
+不是网络问题；
+
+而是：
+
+1. ALL_PROXY=socks:// 导致 HTTPX 失败；
+2. SSH 执行环境没有继承 HTTP_PROXY，导致脚本远程下载失败。

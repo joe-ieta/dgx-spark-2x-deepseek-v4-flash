@@ -20,6 +20,7 @@
 #   bringup/05-build-image.prior-0.21.sh         # 0.21.x
 #
 # Full receipt: docs/14-vllm-027-c8r.md and patches/vllm-0261-main-c8r/README.md.
+
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$KIT/.." && pwd)"

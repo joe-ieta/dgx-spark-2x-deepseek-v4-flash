@@ -1,0 +1,303 @@
+【DGX Spark + DeepSeek-V4-Flash 项目 TileLang 构建问题调查总结】
+
+一、问题背景
+---------------
+在构建 vLLM 0261 + DeepSeek-V4-Flash runtime 镜像过程中，TileLang 构建失败。
+
+初始现象：
+1. Docker build 阶段 TileLang 曾经成功构建。
+2. 后续重新构建时失败。
+3. 怀疑存在：
+   - 多个 Python 环境混用；
+   - Cython 版本变化；
+   - build isolation 导致依赖变化；
+   - TileLang 源码编译路径变化。
+
+
+二、已经确认的环境信息
+---------------
+
+硬件：
+
+GPU:
+    NVIDIA GB10
+
+Compute Capability:
+    12.1 (Blackwell)
+
+
+CUDA:
+
+    CUDA Toolkit:
+        13.0
+
+    nvcc:
+        release 13.0, V13.0.88
+
+
+PyTorch:
+
+    torch:
+        2.13.0+cu130
+
+    torch.version.cuda:
+        13.0
+
+
+GPU 架构支持：
+
+torch.cuda.get_arch_list():
+
+    [
+      sm_80,
+      sm_90,
+      sm_100,
+      sm_110,
+      sm_120
+    ]
+
+
+结论：
+
+CUDA / PyTorch / GPU 架构不是问题。
+
+GB10(sm_121) 环境本身可以运行 CUDA 13 和 PyTorch。
+
+
+三、发现的重要线索
+---------------
+
+检查项目：
+
+    ~/dgx-spark-2x-deepseek-v4-flash
+
+
+搜索 TileLang：
+
+发现：
+
+    ./wheels/tilelang-0.1.12-cp38-abi3-linux_aarch64.whl
+
+
+但是 DeepSeek-V4-Flash 模型依赖：
+
+    hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/
+        inference/requirements.txt
+
+
+里面要求：
+
+    tilelang==0.1.8
+
+
+存在版本不一致：
+
+实际存在：
+
+    tilelang 0.1.12
+
+
+模型要求：
+
+    tilelang 0.1.8
+
+
+因此怀疑：
+
+TileLang 失败并不是 CUDA 问题，
+而是 TileLang package / wheel / build 流程不一致。
+
+
+四、目前形成的主要判断
+---------------
+
+之前失败的路径可能是：
+
+pip install tilelang
+        |
+        |
+        v
+没有匹配 wheel
+        |
+        |
+        v
+进入源码编译
+        |
+        |
+        v
+Cython / cmake / LLVM / CUDA 编译失败
+
+
+真正问题可能：
+
+1. 使用了错误版本 TileLang
+
+或者：
+
+2. wheel 不匹配当前环境
+
+或者：
+
+3. build 时没有复用已经存在的 TileLang wheel
+
+
+五、已经排除的问题
+---------------
+
+以下不是根因：
+
+❌ GPU 不支持
+
+原因：
+PyTorch 已支持：
+
+    sm_120
+
+
+❌ CUDA 版本错误
+
+原因：
+
+    CUDA 13.0
+    Torch 2.13 cu130
+
+
+❌ gcc 版本问题
+
+当前：
+
+    gcc 13.3
+    g++ 13.3
+
+
+属于正常 Ubuntu 24.04 环境。
+
+
+六、下一步调查方向
+---------------
+
+重点不是继续编译 TileLang。
+
+应该先确认现有 wheel 是否可直接使用。
+
+
+需要检查：
+
+1. wheel 内容：
+
+执行：
+
+    unzip -l wheels/tilelang-0.1.12-cp38-abi3-linux_aarch64.whl \
+    | grep -Ei 'cuda|sm_|ptx|cubin|so'
+
+
+确认是否包含：
+
+    libtilelang.so
+    CUDA kernel
+    PTX
+    cubin
+
+
+2. 当前安装状态：
+
+执行：
+
+    pip show tilelang
+
+
+确认：
+
+    version
+    location
+
+
+3. Python import 测试：
+
+执行：
+
+    python - <<'PY'
+    import tilelang
+    print(tilelang.__file__)
+
+    from tilelang import language as T
+    print("TileLang OK")
+    PY
+
+
+确认：
+
+TileLang Python API 是否正常。
+
+
+七、可能解决方案
+---------------
+
+方案 A（优先）
+
+直接使用已有 wheel：
+
+    wheels/tilelang-0.1.12-cp38-abi3-linux_aarch64.whl
+
+
+避免重新源码编译。
+
+
+方案 B
+
+如果 DeepSeek-V4-Flash kernel 与 0.1.12 不兼容：
+
+修改依赖：
+
+    tilelang==0.1.8
+
+改为：
+
+    tilelang==0.1.12
+
+
+重新验证。
+
+
+方案 C
+
+重新编译 TileLang：
+
+但是需要固定：
+
+    Python版本
+    Cython版本
+    CUDA版本
+    TORCH_CUDA_ARCH_LIST
+
+
+避免环境漂移。
+
+
+八、当前最终结论
+---------------
+
+TileLang 构建失败的根因目前高度怀疑：
+
+不是 GPU/CUDA/PyTorch 问题，
+
+而是：
+
+【TileLang 版本、wheel、源码编译路径之间不一致】
+
+下一步应该：
+
+1. 验证已有 tilelang wheel；
+2. 确认当前 Python 环境安装来源；
+3. 避免 pip 再次触发源码 build；
+4. 固定 TileLang 版本后重新验证 DeepSeek-V4 kernel。
+
+
+当前调查状态：
+
+CUDA ✅
+GPU ✅
+PyTorch ✅
+编译工具 ✅
+TileLang package ❓（重点）
+版本一致性 ❓（重点）

@@ -1,0 +1,46 @@
+DGX Spark DeepSeek-V4 集群评测结果总结：
+
+1. 整体状态：
+- eval-cluster.sh 执行成功。
+- Health 检查通过，服务运行正常。
+- 综合评分：100.0/100。
+- 正确性、输出质量、延迟指标、Speculative Decoding 均通过。
+
+2. 测试结果：
+- arithmetic：通过
+- summary：通过
+- json：通过
+- story：通过
+- toolcall：通过
+- concurrency3（3并发）：通过
+- long context：通过
+
+3. 唯一异常：
+- python30 测试显示 truncated。
+- 原因：max_tokens=8192 配额不足，模型的 reasoning/thinking token 消耗了大部分预算，导致最终回答被截断。
+- 不是模型错误，也不影响整体评测结果。
+- 如需避免，可提高 max_tokens（例如 16384 或更高）。
+
+4. 性能指标：
+- Prefill 速度：428.7 tokens/s
+- Decode 速度：34.3 tokens/s
+- Speculative Decoding：
+  - draft acceptance rate：75.1%
+  - 平均接受长度：1.50 tokens
+- 并发测试：
+  - 3 请求同时运行正常
+  - 无排队等待
+
+5. 延迟情况：
+- 平均 TTFT（首 token 时间）：约 6.36 秒（服务端累计统计）
+- 平均端到端响应：约 23 秒
+- 客户端空闲 TTFT：311 ms
+- 高并发 TTFT：3807 ms
+
+6. Cache 状态：
+- Prefix Cache 命中率：4.17%
+- 当前测试请求多为不同 prompt，因此命中率较低，属于正常情况。
+
+结论：
+DGX Spark DeepSeek-V4 集群部署成功，vLLM 服务、GPU 推理、并发处理、Speculative Decoding 均工作正常。
+当前唯一需要优化的是 reasoning 场景的 token budget，可适当提高 max_tokens。

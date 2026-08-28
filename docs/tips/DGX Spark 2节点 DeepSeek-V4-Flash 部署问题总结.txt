@@ -1,0 +1,499 @@
+【DGX Spark 2节点 DeepSeek-V4-Flash 部署问题总结】
+
+一、问题背景
+---------------
+项目：
+dgx-spark-2x-deepseek-v4-flash
+
+环境：
+- 两台 NVIDIA DGX Spark 节点：
+  - head: ieta-spark01
+  - worker: ieta-spark02
+- vLLM:
+  - 0.26.1rc0
+- PyTorch:
+  - 2.13.0+cu130
+- GPU:
+  - NVIDIA GB10
+- 模型：
+  - deepseek-ai/DeepSeek-V4-Flash-0731
+
+部署流程：
+07-download-weights.sh
+        ↓
+08-distribute-weights.sh
+        ↓
+09-smoke-serve.sh
+
+
+二、问题1：HuggingFace 权重下载完成但脚本误判失败
+---------------
+
+现象：
+
+07-download-weights.sh 输出：
+
+Fetching 74 files: 100% 完成
+
+但是：
+
+FAIL: hf download did not report a snapshot dir
+
+实际输出：
+
+  path:
+/home/botlogical/hf-cache/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+
+
+原因：
+
+huggingface_hub 新版本 CLI 输出格式变化。
+
+旧脚本认为 stdout 最后一行直接是：
+
+/path/to/snapshot
+
+
+实际现在是：
+
+path: /path/to/snapshot
+
+
+导致：
+
+snap_path="$(hf download ... | tail -n1)"
+
+得到：
+
+"  path: /home/..."
+
+
+而不是有效目录。
+
+
+解决：
+
+修改：
+
+snap_path="$(hf download ... | tail -n1)"
+
+
+改为：
+
+snap_path="$(
+  HF_HOME="$HF_CACHE" \
+  HF_HUB_DISABLE_XET=1 \
+  ~/hf-venv/bin/hf download "$DSPARK_MODEL" "${rev_args[@]}" \
+  | awk '/snapshots\// {print $NF}' \
+  | tail -n1
+)"
+
+
+结果：
+
+✅ HuggingFace 下载成功
+✅ snapshot 正确识别
+✅ refs/main 正确生成
+✅ safetensors shard 完整
+
+
+验证：
+
+156G
+ok: weights present
+
+
+
+三、问题2：权重分发到 worker 成功
+---------------
+
+执行：
+
+08-distribute-weights.sh
+
+
+结果：
+
+head weights:
+76 166898683710
+
+worker weights:
+76 166898683710
+
+
+验证：
+
+missing_shards=0
+
+ok: worker safetensors shards complete
+
+
+结论：
+
+✅ 权重同步没有问题
+
+
+
+四、问题3：vLLM smoke test 启动失败
+---------------
+
+执行：
+
+09-smoke-serve.sh
+
+
+错误：
+
+RuntimeError:
+Engine core initialization failed
+
+
+进一步查看日志：
+
+发现真正原因：
+
+
+ImportError:
+tilelang is required for mhc but is not installed.
+
+
+调用链：
+
+vLLM
+ |
+ |-- DeepSeek-V4 MHC kernel
+ |
+ |-- vllm/model_executor/kernels/mhc/tilelang.py
+ |
+ |-- import tilelang
+ |
+ X
+
+
+原因：
+
+vLLM DeepSeek-V4 MHC kernel 依赖 TileLang。
+
+当前 vLLM 镜像中没有安装 TileLang。
+
+
+
+五、问题4：手动安装 TileLang wheel
+---------------
+
+已有成功编译 wheel：
+
+tilelang-0.1.12-cp38-abi3-linux_aarch64.whl
+
+
+复制到容器：
+
+docker cp tilelang*.whl vllm-dsv4:/tmp/
+
+
+安装：
+
+pip install /tmp/tilelang*.whl
+
+
+结果：
+
+Successfully installed:
+
+tilelang-0.1.12
+z3-solver
+ml-dtypes
+
+
+但是：
+
+import tilelang
+
+失败：
+
+OSError:
+libz3.so.5.1:
+cannot open shared object file
+
+
+原因：
+
+TileLang 内置 TVM compiler 依赖：
+
+libz3.so.5.1
+
+
+但是 pip 安装的 z3 提供：
+
+/usr/local/lib/python3.12/dist-packages/z3/lib/libz3.so.4.15
+
+
+名称不匹配。
+
+
+
+六、问题5：修复 TileLang 的 Z3 动态库依赖
+---------------
+
+检查：
+
+find / -name "libz3*"
+
+
+发现：
+
+libz3.so
+libz3.so.4.15
+
+
+解决：
+
+创建兼容软链接：
+
+ln -s \
+/usr/local/lib/python3.12/dist-packages/z3/lib/libz3.so.4.15 \
+/usr/local/lib/python3.12/dist-packages/z3/lib/libz3.so.5.1
+
+
+设置：
+
+export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/z3/lib:$LD_LIBRARY_PATH
+
+
+验证：
+
+ldd libtvm_compiler.so
+
+
+之前：
+
+libz3.so.5.1 => not found
+
+
+之后：
+
+libz3.so.5.1 =>
+/usr/local/lib/python3.12/dist-packages/z3/lib/libz3.so.5.1
+
+
+最终：
+
+python3:
+
+import tilelang
+import tvm
+
+
+成功：
+
+TileLang OK
+TVM OK
+
+
+
+七、验证 vLLM 基础环境
+---------------
+
+检查：
+
+import vllm
+
+结果：
+
+vLLM OK:
+0.26.1rc0
+
+
+torch:
+
+Torch:
+2.13.0+cu130
+
+
+CUDA:
+
+CUDA:
+True
+
+
+GPU:
+
+NVIDIA GB10
+
+
+说明：
+
+✅ vLLM 正常
+✅ CUDA 正常
+✅ TileLang 正常
+✅ TVM 正常
+
+
+
+八、将修复后的 container 保存为 image
+---------------
+
+因为手工修改 container：
+
+- pip install TileLang
+- z3 软链接
+- 依赖修复
+
+
+需要保存。
+
+
+执行：
+
+docker commit vllm-dsv4 \
+vllm-dsv4-tilelang-fixed:latest
+
+
+然后：
+
+docker save + gzip
+
+
+传输到 worker：
+
+scp
+
+
+worker:
+
+docker load
+
+
+
+九、发现 compose 使用的 image 名称不同
+---------------
+
+问题：
+
+compose 文件：
+
+runtime/docker-compose.dspark.yml
+
+
+实际：
+
+image:
+${DSPARK_VLLM_IMAGE:-vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache}
+
+
+并不是：
+
+vllm-dsv4:latest
+
+
+因此直接 commit 的 image 不会被 compose 使用。
+
+
+解决：
+
+重新 tag：
+
+docker tag \
+vllm-dsv4-tilelang-fixed:latest \
+vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache
+
+
+然后：
+
+两台机器加载同名 image。
+
+
+验证：
+
+docker image inspect \
+vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache
+
+
+两个节点 Image ID 必须一致。
+
+
+
+十、当前状态
+---------------
+
+已经解决：
+
+✅ HuggingFace 下载脚本兼容问题
+
+✅ 模型权重下载
+
+✅ 权重同步到 worker
+
+✅ vLLM 找不到 TileLang
+
+✅ TileLang wheel 安装
+
+✅ TVM 加载失败
+
+✅ libz3.so.5.1 缺失
+
+✅ TileLang + TVM import
+
+
+当前下一步：
+
+1. 确认 head/worker 使用同一个修复后的 vLLM image
+
+2. 确认 docker-compose 使用正确 image
+
+3. 重新运行：
+
+bash bringup/09-smoke-serve.sh
+
+
+如果仍失败，新的错误将进入：
+- TileLang MHC kernel 编译
+- CUDA kernel
+- NCCL 通信
+- DeepSeek-V4 runtime
+
+
+而不是之前的依赖问题。
+
+
+十一、长期优化建议
+---------------
+
+当前方案：
+
+docker commit
+
+
+适合：
+- 快速 smoke test
+- 验证环境
+
+
+最终应该修改 Docker build：
+
+Dockerfile 中加入：
+
+1. 安装 TileLang wheel：
+
+pip install tilelang-0.1.12-cp38-abi3-linux_aarch64.whl
+
+
+2. 固定 Z3 动态库：
+
+创建 libz3.so.5.1
+
+
+3. 设置：
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/z3/lib:$LD_LIBRARY_PATH
+
+
+重新 build 固化镜像。
+
+
+这样后续：
+- docker compose recreate
+- 节点扩容
+- worker 重启
+
+都不会丢失 TileLang 修复。

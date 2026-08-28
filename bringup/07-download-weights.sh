@@ -7,9 +7,25 @@ source "$KIT/../runtime/cluster.env"
 
 fail() { echo "FAIL: $1 — $2" >&2; exit 1; }
 
-ssh "$CLUSTER_USER@$HEAD_HOST" "HF_CACHE='$HF_CACHE' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' bash -s" <<'REMOTE' \
+# ssh "$CLUSTER_USER@$HEAD_HOST" "HF_CACHE='$HF_CACHE' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' bash -s" <<'REMOTE' \
+#  || fail "weight download failed on $HEAD_HOST" "rerun; huggingface_hub download is resumable"
+# set -euo pipefail
+
+ssh "$CLUSTER_USER@$HEAD_HOST" \
+"HTTP_PROXY='${HTTP_PROXY:-}' \
+ HTTPS_PROXY='${HTTPS_PROXY:-}' \
+ http_proxy='${http_proxy:-}' \
+ https_proxy='${https_proxy:-}' \
+ HF_CACHE='$HF_CACHE' \
+ DSPARK_MODEL='$DSPARK_MODEL' \
+ DSPARK_REVISION='${DSPARK_REVISION:-}' \
+ bash -s" <<'REMOTE' \
   || fail "weight download failed on $HEAD_HOST" "rerun; huggingface_hub download is resumable"
 set -euo pipefail
+
+# let HF use proper proxy
+unset ALL_PROXY all_proxy
+#env | grep -i proxy
 
 if [ ! -x ~/hf-venv/bin/hf ]; then
   python3 -m venv ~/hf-venv
@@ -20,10 +36,16 @@ echo "ok: hf CLI available"
 mkdir -p "$HF_CACHE"
 rev_args=()
 [ -n "$DSPARK_REVISION" ] && rev_args+=(--revision "$DSPARK_REVISION")
-# hf download prints the resolved snapshot path on stdout (progress goes to stderr) —
-# capture it so every check below targets THE snapshot this run produced, not whichever
-# snapshot find(1) happens to hit first when an older revision is still resident.
-snap_path="$(HF_HOME="$HF_CACHE" HF_HUB_DISABLE_XET=1 ~/hf-venv/bin/hf download "$DSPARK_MODEL" "${rev_args[@]}" | tail -n1)"
+
+# hf download prints a report containing "path: <resolved snapshot>" on stdout.
+# Extract that path so every check below targets THE snapshot this run produced.
+snap_path="$(
+  HF_HOME="$HF_CACHE" \
+  HF_HUB_DISABLE_XET=1 \
+  ~/hf-venv/bin/hf download "$DSPARK_MODEL" "${rev_args[@]}" \
+  | awk '/snapshots\// {print $NF}' \
+  | tail -n1
+)"
 echo "ok: hf download completed"
 
 model_dir="$HF_CACHE/hub/models--${DSPARK_MODEL//\//--}"

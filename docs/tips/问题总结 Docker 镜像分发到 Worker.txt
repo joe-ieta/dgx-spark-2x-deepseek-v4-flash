@@ -1,0 +1,206 @@
+问题总结：Docker 镜像分发到 Worker 节点后提示 "image IDs differ"
+
+一、遇到的问题
+---------------
+在执行：
+
+    bash bringup/06-distribute-image.sh
+
+进行 DGX Spark 双节点集群镜像分发时，镜像成功从 Head 节点复制到 Worker 节点：
+
+流程：
+Head 节点：
+    docker save
+        |
+        v
+    zstd 压缩
+        |
+        v
+    rsync 通过 QSFP 网络传输
+        |
+        v
+Worker 节点：
+    docker load
+
+日志显示：
+
+    ok: image archive copied to worker
+    ok: image loaded on worker
+
+但是最后校验失败：
+
+    head image:
+    sha256:3408df3251041a3cce31adfbba2e5dc63086a2a03be7383856e5822181588049
+
+    worker image:
+    sha256:4cb4c0320608d9ee077c231803b0b35d8d6112e1671e7e0e9294fd04d2b927bd
+
+    FAIL: image IDs differ
+
+
+二、原因分析
+---------------
+
+脚本中的检查逻辑：
+
+    docker image inspect IMAGE --format '{{.Id}}'
+
+比较的是 Docker Image ID。
+
+这个 ID 是：
+
+    image config digest
+
+不是：
+
+    镜像内容 digest
+    layer digest
+
+
+docker save/load 后，即使：
+
+- 所有 filesystem layer 完全一致
+- 镜像运行效果完全一致
+
+Docker 仍可能重新生成 image config，因此：
+
+Head:
+
+    IMAGE ID = 3408df325104
+
+Worker:
+
+    IMAGE ID = 4cb4c0320608
+
+
+两者不同并不代表镜像内容不同。
+
+
+造成这种情况的常见原因：
+
+1. Docker BuildKit 构建的镜像
+2. docker save/load OCI manifest 转换
+3. Docker 版本不同
+4. storage driver 不同
+5. image metadata/history 被重新生成
+
+
+三、已确认的事实
+---------------
+
+镜像分发本身没有失败。
+
+成功步骤：
+
+    docker save        OK
+    rsync              OK
+    docker load        OK
+    image tag          OK
+    FlashInfer cache 清理 OK
+
+
+Worker 节点已经加载：
+
+    vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache
+
+    vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev
+
+    vllm-dspark-src:v0261-main-c8
+
+
+问题只发生在最后的 Image ID 校验。
+
+
+四、解决方案
+---------------
+
+修改：
+
+    bringup/06-distribute-image.sh
+
+
+不要比较：
+
+    docker image inspect IMAGE --format '{{.Id}}'
+
+
+改成比较实际 layer 内容：
+
+例如：
+
+    head_rootfs=$(ssh HEAD \
+    "docker image inspect IMAGE --format '{{json .RootFS.Layers}}'")
+
+
+    worker_rootfs=$(ssh WORKER \
+    "docker image inspect IMAGE --format '{{json .RootFS.Layers}}'")
+
+
+然后比较：
+
+    if [ "$head_rootfs" != "$worker_rootfs" ]; then
+        fail "image layers differ"
+    fi
+
+
+这样检查的是：
+
+    Docker filesystem layers
+
+而不是：
+
+    本地 image object ID
+
+
+五、推荐进一步验证
+---------------
+
+在 Head 和 Worker 分别执行：
+
+    docker image inspect \
+    vllm-dspark-runtime:v0261-main-c8r-tbfix-ixfix-c128arev-smpcache \
+    --format '{{json .RootFS}}'
+
+
+如果 RootFS Layers 一致：
+
+说明：
+    镜像完全一致，可以正常用于 vLLM 集群。
+
+
+六、最终结论
+---------------
+
+问题：
+    06-distribute-image.sh 的镜像一致性检查方式错误。
+
+
+不是：
+    docker save/load 失败
+    rsync 失败
+    worker 镜像损坏
+
+
+原因：
+    Docker Image ID 不是跨机器可靠的一致性标识。
+
+
+修复：
+    使用 RootFS layer digest 或 image digest 校验，
+    不使用 docker image inspect 的 .Id。
+
+
+当前镜像分发流程：
+    Head build image
+        |
+        v
+    docker save
+        |
+        v
+    rsync
+        |
+        v
+    docker load Worker
+
+流程本身可以继续使用。
+只需要修正最后的验证逻辑。

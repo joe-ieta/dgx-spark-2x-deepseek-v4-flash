@@ -1,0 +1,451 @@
+============================================================
+DGX Spark 双节点 DeepSeek-V4-Flash 集群问题总结与解决过程
+============================================================
+
+一、背景环境
+------------------------------------------------------------
+集群：
+
+Master 节点：
+    ieta-spark01
+
+Worker 节点：
+    ieta-spark02
+
+
+网络接口：
+
+1. QSFP 集群通信网络（用于 NCCL / Gloo / vLLM 多节点通信）
+
+Rail 1:
+    Master:
+        enp1s0f1np1
+        192.168.100.10
+
+    Worker:
+        enp1s0f1np1
+        192.168.100.11
+
+
+Rail 2:
+    Master:
+        enP2p1s0f1np1
+        192.168.101.10
+
+    Worker:
+        enP2p1s0f1np1
+        192.168.101.11
+
+
+2. 外部 LAN 网络（提供 API 访问）
+
+Master:
+    enP7s7
+    200.0.0.101
+
+Worker:
+    enP7s7
+    200.0.0.100
+
+
+目标：
+
+让其他 LAN 机器访问：
+
+    http://200.0.0.101:8000
+
+访问 vLLM DeepSeek-V4-Flash API。
+
+
+
+============================================================
+二、发现的问题 1：MASTER_ADDR 配置错误
+============================================================
+
+现象：
+
+检查 runtime/.env.dspark：
+
+发现：
+
+    MASTER_ADDR=192.168.101.10
+
+
+但是 cluster.env 中定义：
+
+    HEAD_R1=192.168.100.10
+
+并且项目规则：
+
+    MASTER_ADDR 必须等于 HEAD_R1
+
+
+原因：
+
+render-env.sh 之前生成的 .env.dspark 没有同步最新 cluster.env。
+
+导致：
+
+head / worker 的 rendezvous 地址可能走错误的 Rail 2 网络。
+
+
+解决：
+
+重新生成环境文件：
+
+Master:
+
+    cd ~/dgx-spark-2x-deepseek-v4-flash
+
+    bash runtime/render-env.sh head
+
+
+Worker:
+
+    ssh ieta-spark02.local
+
+    cd ~/dgx-cluster/runtime
+
+    bash render-env.sh worker
+
+
+确认：
+
+    MASTER_ADDR=192.168.100.10
+
+    VLLM_HOST_IP:
+        Master = 192.168.100.10
+        Worker = 192.168.100.11
+
+
+验证：
+
+    bash runtime/preflight.sh worker
+
+
+结果：
+
+    preflight passed (worker)
+
+
+说明：
+
+NCCL/Gloo/MASTER_ADDR 配置正确。
+
+
+============================================================
+三、问题 2：systemd 服务重新部署
+============================================================
+
+重新安装服务：
+
+    bash bringup/install-services.sh
+
+
+结果：
+
+Master:
+
+    vllm-dsv4-head.service installed
+
+
+Worker:
+
+    vllm-dsv4-worker.service installed
+
+
+启动：
+
+    bash runtime/cluster-enable.sh
+
+
+结果：
+
+Worker:
+
+    Active: active (running)
+
+
+日志：
+
+    DSpark draft model loaded
+
+    Loading weights took ...
+
+    Model loading completed
+
+
+说明：
+
+双节点 DeepSeek-V4-Flash 已经正常运行。
+
+
+============================================================
+四、问题 3：外部 LAN 无法访问 vLLM API
+============================================================
+
+现象：
+
+本机：
+
+    curl http://127.0.0.1:8000/health
+
+
+成功：
+
+    HTTP/1.1 200 OK
+
+
+检查监听：
+
+    ss -ltnp | grep 8000
+
+
+结果：
+
+    LISTEN 0.0.0.0:8000
+
+
+说明：
+
+vLLM 已经绑定所有 IPv4 地址。
+
+
+检查 Docker：
+
+docker-compose:
+
+    network_mode: host
+
+
+说明：
+
+没有 Docker NAT 问题。
+
+
+检查 vLLM 启动参数：
+
+    --host 0.0.0.0
+    --port 8000
+
+
+正确。
+
+
+============================================================
+五、真正原因：HTTP Proxy 环境变量导致误判
+============================================================
+
+测试：
+
+执行：
+
+    curl http://200.0.0.101:8000/health
+
+
+失败。
+
+
+原因：
+
+curl 输出：
+
+    Uses proxy env variable http_proxy
+
+    http_proxy=http://202.0.0.114:4780/
+
+
+请求实际上：
+
+错误路径：
+
+    Client
+       |
+       |
+       v
+    HTTP Proxy
+    202.0.0.114:4780
+       |
+       X
+    200.0.0.101:8000
+
+
+不是：
+
+    Client
+       |
+       |
+       v
+    200.0.0.101:8000
+
+
+解决：
+
+绕过代理：
+
+    curl --noproxy '*' \
+         http://200.0.0.101:8000/health
+
+
+结果：
+
+    HTTP/1.1 200 OK
+
+
+证明：
+
+vLLM 服务完全正常。
+
+
+============================================================
+六、进一步验证：其他 LAN 机器访问
+============================================================
+
+在 Master：
+
+运行：
+
+    sudo tcpdump -ni enP7s7 'tcp port 8000'
+
+
+另一台 LAN 机器：
+
+    IP:
+        200.0.0.200
+
+
+访问：
+
+    curl http://200.0.0.101:8000/health
+
+
+tcpdump 捕获：
+
+    200.0.0.200 -> 200.0.0.101:8000 SYN
+
+    200.0.0.101 -> 200.0.0.200 SYN-ACK
+
+    TCP handshake successful
+
+
+随后：
+
+HTTP 请求：
+
+    Client -> vLLM
+
+响应：
+
+    vLLM -> Client
+
+
+说明：
+
+网络路径完全正常。
+
+
+============================================================
+七、最终结论
+============================================================
+
+问题不是：
+
+    ❌ vLLM host 配置
+
+    ❌ Docker 网络
+
+    ❌ docker-compose
+
+    ❌ network_mode
+
+    ❌ UFW firewall
+
+    ❌ NCCL
+
+    ❌ Gloo
+
+    ❌ cluster.env
+
+
+真正问题：
+
+    HTTP Proxy 环境变量影响 curl / 浏览器访问。
+
+
+解决方式：
+
+1. 保持集群配置不变：
+
+    MASTER_ADDR=192.168.100.10
+
+    NCCL_SOCKET_IFNAME=enp1s0f1np1
+
+    GLOO_SOCKET_IFNAME=enp1s0f1np1
+
+
+2. 在访问 API 的机器配置 NO_PROXY：
+
+Linux:
+
+    export NO_PROXY="
+    localhost,
+    127.0.0.1,
+    ::1,
+    200.0.0.0/24,
+    192.168.100.0/24,
+    192.168.101.0/24
+    "
+
+    export no_proxy="$NO_PROXY"
+
+
+或者写入：
+
+    ~/.bashrc
+
+
+3. 浏览器访问：
+
+    将：
+
+        200.0.0.101
+
+    加入浏览器代理 bypass 列表。
+
+
+============================================================
+八、最终状态
+============================================================
+
+当前集群：
+
+    ✅ Master/Worker 双节点正常运行
+
+    ✅ DeepSeek-V4-Flash 模型加载成功
+
+    ✅ vLLM API 监听:
+            0.0.0.0:8000
+
+    ✅ Docker host network 正常
+
+    ✅ QSFP Rail-1 通信正常
+
+    ✅ NCCL/Gloo 配置正确
+
+    ✅ LAN TCP 8000 可达
+
+    ✅ 外部访问只需要处理 Proxy bypass
+
+
+最终访问方式：
+
+    curl --noproxy '*' \
+         http://200.0.0.101:8000/health
+
+
+返回：
+
+    HTTP/1.1 200 OK
+
+
+============================================================
